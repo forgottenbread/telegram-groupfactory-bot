@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: groupfactory-client-bot-config
+  namespace: groupfactory
+  labels:
+    app.kubernetes.io/name: groupfactory-client-bot
+data:
+  GROUPFACTORY_API_BASE_URL: "http://groupfactory:8000"
+  GROUPFACTORY_API_TIMEOUT: "300"
+  BOT_ALLOWED_CHAT_IDS: "-1001234567890"
