@@ -1,3 +1,9 @@
+<!-- gitea-mirror-notice:start -->
+> [!IMPORTANT]
+> **This GitHub repository is a mirror.**  
+> The canonical public repository is [https://git.mulas.me/corrado/telegram-groupfactory-bot](https://git.mulas.me/corrado/telegram-groupfactory-bot).
+<!-- gitea-mirror-notice:end -->
+
 # telegram-groupfactory-bot
 
 Conventional Telegram Bot API client for `telegram-groupfactory`.

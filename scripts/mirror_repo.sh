@@ -11,15 +11,30 @@ TARGET_BRANCH="${TARGET_BRANCH:-master}"
 MR_BRANCH="${MR_BRANCH:-feat}"
 MR_TITLE="${MR_TITLE:-Mirror telegram-groupfactory-bot}"
 MR_DESCRIPTION="${MR_DESCRIPTION:-Mirror from ${SOURCE_URL} into ${DESTINATION_URL}.}"
-COMMIT_MESSAGE="${COMMIT_MESSAGE:-Mirror source repository tree}"
+COMMIT_MESSAGE="${COMMIT_MESSAGE:-}"
 WORKDIR=""
 KEEP_WORKDIR=0
 ASSUME_YES=0
 FORCE_WITH_LEASE=1
+SRC_ONLY="${SRC_ONLY:-0}"
 
 usage() {
   cat <<'EOF'
 Mirror telegram-groupfactory-bot through a GitLab merge request.
+
+This script:
+  1. Clones DESTINATION_URL / TARGET_BRANCH into a temporary workdir.
+  2. Fetches SOURCE_URL / SOURCE_BRANCH.
+  3. Creates MR_BRANCH from TARGET_BRANCH.
+  4. Replaces the MR_BRANCH tree with the source branch tree.
+  5. Pushes MR_BRANCH and asks GitLab to create a merge request.
+
+It does not push directly to the protected target branch.
+Because the MR branch starts from the destination target branch, it avoids
+"source branch is behind target" merge conflicts caused by protected master.
+
+Use --src-only to mirror the source repository while preserving destination
+deployment/example folders: argo/, argocd/, examples/, and k8s/.
 
 Usage:
   scripts/mirror_repo.sh [options]
@@ -33,6 +48,7 @@ Options:
       --title TEXT          Merge request title.
       --description TEXT    Merge request description.
       --commit-message TEXT Commit message for the source tree update.
+      --src-only            Mirror everything except argo/, argocd/, examples/, and k8s/.
       --no-force-with-lease Use plain --force instead of --force-with-lease.
   -w, --workdir DIR         Directory used for the temporary clone.
   -k, --keep-workdir        Keep the temporary clone after finishing.
@@ -41,7 +57,14 @@ Options:
 
 Environment overrides:
   SOURCE_URL, DESTINATION_URL, SOURCE_BRANCH, TARGET_BRANCH, MR_BRANCH,
-  MR_TITLE, MR_DESCRIPTION, COMMIT_MESSAGE
+  MR_TITLE, MR_DESCRIPTION, COMMIT_MESSAGE, SRC_ONLY
+
+Defaults:
+  source:      https://git.mulas.me/corrado/telegram-groupfactory-bot.git
+  destination: https://git.devops.lnxc.it/dev/IMS/telegram-groupfactory-bot.git
+  source ref:  master
+  MR branch:   feat
+  MR target:   master
 EOF
 }
 
@@ -79,6 +102,10 @@ while [[ $# -gt 0 ]]; do
       COMMIT_MESSAGE="$2"
       shift 2
       ;;
+    --src-only)
+      SRC_ONLY=1
+      shift
+      ;;
     --no-force-with-lease)
       FORCE_WITH_LEASE=0
       shift
@@ -107,6 +134,42 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$SRC_ONLY" in
+  1|true|TRUE|yes|YES)
+    SRC_ONLY=1
+    ;;
+  0|false|FALSE|no|NO|"")
+    SRC_ONLY=0
+    ;;
+  *)
+    echo "SRC_ONLY must be 1/0, true/false, or yes/no." >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "$COMMIT_MESSAGE" ]]; then
+  if [[ "$SRC_ONLY" -eq 1 ]]; then
+    COMMIT_MESSAGE="Mirror source tree excluding deployment folders"
+  else
+    COMMIT_MESSAGE="Mirror source repository tree"
+  fi
+fi
+
+if [[ -z "$SOURCE_URL" || -z "$DESTINATION_URL" ]]; then
+  echo "Both source and destination URLs are required." >&2
+  exit 2
+fi
+
+if [[ -z "$SOURCE_BRANCH" || -z "$TARGET_BRANCH" || -z "$MR_BRANCH" ]]; then
+  echo "Source branch, target branch, and MR branch are required." >&2
+  exit 2
+fi
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "git is required but was not found in PATH." >&2
+  exit 1
+fi
+
 if [[ -z "$WORKDIR" ]]; then
   WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/telegram-groupfactory-bot-mr.XXXXXX")"
 else
@@ -125,11 +188,21 @@ echo "Destination:  $DESTINATION_URL"
 echo "Source ref:   $SOURCE_BRANCH"
 echo "MR branch:    $MR_BRANCH"
 echo "MR target:    $TARGET_BRANCH"
+if [[ "$SRC_ONLY" -eq 1 ]]; then
+  echo "Mirror mode:  full tree excluding argo/, argocd/, examples/, k8s/"
+else
+  echo "Mirror mode:  full tree"
+fi
 echo "Workdir:      $WORKDIR"
 echo
 
 if [[ "$ASSUME_YES" -eq 0 ]]; then
-  read -r -p "Create ${MR_BRANCH} from destination/${TARGET_BRANCH}, apply source/${SOURCE_BRANCH}, and create MR? [y/N] " reply
+  if [[ "$SRC_ONLY" -eq 1 ]]; then
+    prompt="Create ${MR_BRANCH} from destination/${TARGET_BRANCH}, apply source/${SOURCE_BRANCH} excluding argo/, argocd/, examples/, k8s/, and create MR? [y/N] "
+  else
+    prompt="Create ${MR_BRANCH} from destination/${TARGET_BRANCH}, apply source/${SOURCE_BRANCH}, and create MR? [y/N] "
+  fi
+  read -r -p "$prompt" reply
   case "$reply" in
     y|Y|yes|YES)
       ;;
@@ -164,11 +237,31 @@ TARGET_COMMIT="$(git rev-parse "$TARGET_REF")"
 echo "Creating MR branch from destination target..."
 git checkout -B "$MR_BRANCH" "$TARGET_REF"
 
-echo "Applying source tree from ${SOURCE_COMMIT}..."
-git read-tree --reset -u "$SOURCE_REF"
+if [[ "$SRC_ONLY" -eq 1 ]]; then
+  echo "Applying source tree from ${SOURCE_COMMIT}, preserving deployment/example folders from destination..."
+  git read-tree --reset -u "$SOURCE_REF"
+
+  preserved_paths=(argo argocd examples k8s)
+  for preserved_path in "${preserved_paths[@]}"; do
+    if git cat-file -e "${TARGET_REF}:${preserved_path}" 2>/dev/null; then
+      echo "Preserving ${preserved_path}/ from destination ${TARGET_BRANCH}..."
+      git checkout "$TARGET_REF" -- "$preserved_path"
+    else
+      echo "Removing ${preserved_path}/ because it is not present in destination ${TARGET_BRANCH}..."
+      git rm -r --ignore-unmatch -- "$preserved_path"
+    fi
+  done
+else
+  echo "Applying source tree from ${SOURCE_COMMIT}..."
+  git read-tree --reset -u "$SOURCE_REF"
+fi
 
 if git diff --cached --quiet; then
-  echo "Destination ${TARGET_BRANCH} already has the same tree as source ${SOURCE_BRANCH}."
+  if [[ "$SRC_ONLY" -eq 1 ]]; then
+    echo "Destination ${TARGET_BRANCH} already has the same source tree as ${SOURCE_BRANCH}, excluding preserved folders."
+  else
+    echo "Destination ${TARGET_BRANCH} already has the same tree as source ${SOURCE_BRANCH}."
+  fi
   echo "Nothing to push."
   exit 0
 fi
@@ -178,6 +271,7 @@ git commit \
   -m "Source: $SOURCE_URL" \
   -m "Source branch: $SOURCE_BRANCH" \
   -m "Source commit: $SOURCE_COMMIT" \
+  -m "Mirror mode: $([[ "$SRC_ONLY" -eq 1 ]] && echo "full tree excluding argo/, argocd/, examples/, k8s/" || echo "full tree")" \
   -m "Destination base: $DESTINATION_URL" \
   -m "Destination target: $TARGET_BRANCH" \
   -m "Destination base commit: $TARGET_COMMIT"
